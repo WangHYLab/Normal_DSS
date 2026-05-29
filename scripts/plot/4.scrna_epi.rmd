@@ -1,0 +1,451 @@
+---
+output: 
+  html_document:
+    code_folding: hide
+    toc: true
+    toc_float: true
+    toc_depth: 2
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo=TRUE, message=FALSE)
+```
+
+```{r}
+library(tidyr)
+library(patchwork)
+library(dplyr)
+library(ggplot2)
+library(Seurat)
+library(DT)
+library(ComplexHeatmap)
+library(circlize)
+library(tibble)
+library(stringr)
+library(ggrepel)
+library(RColorBrewer)
+library(forcats)
+
+source('/home/chenshuting/drug_toxicity/Normal_DSS/scripts/plot/visualization.R')
+
+WORK_DIR <- '/home/chenshuting/drug_toxicity/pan_tissue_landscape/'
+DATA_DIR <- '/home/chenshuting/drug_toxicity/pan_tissue/Breast/GSE235326/'
+
+```
+
+# Read data with annotation, prediction results, umap
+
+```{r}
+celltype_col <- 'broad_cell_type'
+# Read Seurat object
+seurat.combined <- readRDS(paste0(WORK_DIR,'Rdata/breast_HumanBreastCellAtlas_epi_clustered.rds'))
+
+## Get 297 drug information
+drug_info <- readRDS('/home/chenshuting/drug_toxicity/prior_knowledge/drug_info_df.rds')
+
+```
+
+
+
+# F4B Original annotation UMAP plot
+```{r,fig.width=5,fig.height=4}
+DimPlot(seurat.combined,group.by=celltype_col,label=T) +
+  ggtitle("Breast epithelial subtypes") +
+  theme(
+    plot.title = element_text(size = 12)
+  )+
+  plot_annotation(tag_levels = list("B"))
+
+ggsave(paste0(WORK_DIR,"Figures/Figure4_hbca_epi/B_umap.pdf"),width = 5,height = 4)
+
+```
+
+
+# Drug-cluster sensitive cell proportion
+
+```{r, echo=TRUE,eval = FALSE}
+# Count sensitive/resistant proportion per drug-broad_cell_type
+prop_df <- lapply(drug_cols, function(drug_col) {
+  drug_name <- sub("^scPharm_label_", "", drug_col)
+  
+  metadata %>%
+    filter(!is.na(.data[[drug_col]])) %>%
+    group_by(broad_cell_type) %>%
+    summarise(
+      sensitive_prop = mean(.data[[drug_col]] == "sensitive"),
+      resistant_prop = mean(.data[[drug_col]] == "resistant"),
+      .groups = "drop"
+    ) %>%
+    mutate(drug_id_name = drug_name)
+}) %>% bind_rows()
+
+# Merge drug annotation (pathway)
+prop_df <- prop_df %>%
+  left_join(drug_info[, c("drug_id_name", "pathway_name")], by = "drug_id_name") %>%
+  mutate(pathway_name = ifelse(is.na(pathway_name), "Unknown", pathway_name))
+
+prop_df$broad_cell_type <- factor(prop_df$broad_cell_type,
+                                  levels = c("basal","lumsec","lumhr"))
+
+prop_df <- prop_df %>%
+  mutate(
+    drug_name = sub("^[^_]+_", "", drug_id_name)
+  )
+
+saveRDS(prop_df,paste0(DATA_DIR,"Rdata/tissue_prop_df.rds"))
+
+```
+
+```{r}
+prop_df <- readRDS(paste0(DATA_DIR,"Rdata/tissue_prop_df.rds"))
+
+prop_df$broad_cell_type <- as.character(prop_df$broad_cell_type)
+
+prop_df$broad_cell_type[prop_df$broad_cell_type == "basal"] <- "Basal"
+prop_df$broad_cell_type[prop_df$broad_cell_type == "lumhr"] <- "Luminal-HR"
+prop_df$broad_cell_type[prop_df$broad_cell_type == "lumsec"] <- "Luminal-Sec"
+
+# Get celltype-specific drugs
+library(dplyr)
+
+specific_df <- prop_df %>%
+  group_by(drug_id_name) %>%
+  mutate(
+    total_other = sum(sensitive_prop) - sensitive_prop,
+    specificity_score = sensitive_prop - total_other
+  ) %>%
+  ungroup()
+
+top3_labels <- specific_df %>%
+  group_by(broad_cell_type) %>%
+  arrange(desc(specificity_score)) %>%
+  slice_head(n = 3) %>%
+  ungroup()
+
+```
+
+
+
+
+## F4C Boxplot
+
+```{r,fig.width=4,fig.height=4}
+prop_df2 <- prop_df %>%
+  mutate(
+    broad_cell_type = fct_reorder(
+      broad_cell_type,
+      sensitive_prop,
+      .fun = median,
+      .desc = TRUE
+    )
+  )
+
+library(ggpubr)
+
+ggplot(prop_df2, aes(x = broad_cell_type, y = sensitive_prop)) +
+  geom_boxplot(fill = "grey85", outlier.shape = NA) +
+  my_theme() +
+  labs(
+    x = "Cell type",
+    y = "Susceptible cell fraction"
+  ) +
+  stat_compare_means(
+    method = "wilcox.test",    # Pairwise comparison
+    comparisons = list(
+      c("basal", "lumhr"),
+      c("basal", "lumsec"),
+      c("lumhr", "lumsec")
+    ),
+    p.adjust.method = "BH",
+    label = "p.signif"
+  ) +
+  plot_annotation(
+    tag_levels = list(c("C"))
+  )
+
+ggsave(paste0(WORK_DIR,"Figures/Figure4_hbca_epi/C_boxplot.pdf"),width = 4,height = 4)
+
+```
+
+## F4D-O UMAP
+
+```{r}
+top3drug_id_name_list <- list(
+  basal = c('1068_Obatoclax Mesylate','1046_Wee1 Inhibitor','1922_Cediranib'),
+  lumsec = c('2498_alpha-lipoic acid','1510_Linsitinib','1709_CDK9_5038'),
+  lumhr = c('1032_Afatinib','1042_Doramapimod','1632_Ribociclib'),
+  basal_lumsec = c('1845_Schweinfurthin A','1738_IGF1R_3801','1083_Crizotinib')
+)
+library(patchwork)
+
+all_plots <- list()
+
+for (broad_cell_type in names(top3drug_id_name_list)) {
+  
+  # Get top drugs per cell type
+  top3drug_id_name <- top3drug_id_name_list[[broad_cell_type]]
+  top3drug_name <- sub("^[^_]+_", "", top3drug_id_name)
+  
+  for (drug_id_name in top3drug_id_name) {
+    drug_name <- sub("^[^_]+_", "", drug_id_name)
+    drug_col <- paste0("scPharm_label_", drug_id_name)
+    
+    seurat.combined@meta.data[[drug_name]] <- ifelse(
+      seurat.combined@meta.data[[drug_col]] == "sensitive",
+      "Susceptible",
+      "Other"
+    )
+  }
+  
+  # Return single plot list instead of combining
+  p_list <- DimPlot(
+    seurat.combined,
+    group.by = top3drug_name,
+    cols = c("grey70", "firebrick"),
+    combine = FALSE
+  )
+  
+  all_plots <- c(all_plots, p_list)
+}
+```
+
+```{r,fig.width=20,fig.height=12}
+final_plot <- wrap_plots(all_plots, ncol = 4, nrow = 3) +
+  plot_annotation(
+    tag_levels = list(LETTERS[4:15])
+  )
+final_plot
+
+ggsave(
+  paste0(WORK_DIR, "Figures/Figure4_hbca_epi/D-O_umap_scpharm.pdf"),
+  final_plot,
+  width = 20,
+  height = 12
+)
+```
+
+## F4P EGFR pathway boxplot
+
+```{r,fig.width=4,fig.height=4.5}
+prop_df_pathway <- prop_df[prop_df$pathway_name=='EGFR signaling',]
+
+library(ggplot2)
+library(ggrepel)
+
+# Mark highlight status
+prop_df_pathway$highlight <- prop_df_pathway$drug_name == "Afatinib"
+
+comparisons <- list(
+  c("Basal", "Luminal-HR"),
+      c("Basal", "Luminal-Sec"),
+      c("Luminal-HR", "Luminal-Sec")
+)
+
+y_max <- max(prop_df_pathway$sensitive_prop, na.rm = TRUE)
+
+ggplot(
+  prop_df_pathway,
+  aes(x = broad_cell_type, y = sensitive_prop)
+) +
+  geom_boxplot(
+    fill = "white",
+    outlier.shape = NA
+  ) +
+  geom_jitter(
+    data = subset(prop_df_pathway, !highlight),
+    width = 0.2,
+    size = 1.5,
+    color = "grey70",
+    alpha = 0.6
+  ) +
+  geom_jitter(
+    data = subset(prop_df_pathway, highlight),
+    width = 0.2,
+    size = 3,
+    color = "#D55E00"
+  ) +
+  geom_text_repel(
+    data = subset(prop_df_pathway, highlight),
+    aes(label = drug_name),
+    size = 4,
+    color = "#D55E00",
+    box.padding = 0.3,
+    point.padding = 0.3,
+    max.overlaps = Inf
+  ) +
+  stat_compare_means(
+    comparisons = comparisons,
+    method = "wilcox.test",
+    p.adjust.method = "BH",
+    label = "p.signif",
+    label.y = c(y_max * 1.08, y_max * 1.16, y_max * 1.24)
+  ) +
+  labs(
+    x = "Breast epithelial subtypes",
+    y = "DSS",
+    title = "EGFR signaling"
+  ) +
+  my_theme() +
+  theme(
+    plot.title = element_text(size = 12)
+  ) +
+  coord_cartesian(ylim = c(0, y_max * 1.3), clip = "off") +
+  plot_annotation(
+    tag_levels = list(c("P"))
+  )
+
+
+ggsave(paste0(WORK_DIR,"Figures/Figure4_hbca_epi/P_EGFR_boxplot.pdf"),width = 4,height = 4.5)
+
+
+```
+
+## F4Q Signature violin plot
+
+```{r}
+pathway_name <- 'ERBB_SIGNALING_PATHWAY'
+gs_list <- readRDS('/home/chenshuting/Pipelines/ORA/gs_list.rds')
+gs_kegg <- gs_list$kegg
+pathway_genes <- gs_kegg$gene_symbols[gs_kegg$gs_name==pathway_name]
+```
+
+
+
+Intersection of drug DE genes and pathway genes
+
+```{r}
+drug_col <- "scPharm_label_1032_Afatinib"
+scpharm.markers <- readRDS(paste0(DATA_DIR,'Rdata/scPharmDE_',drug_col,".rds"))
+intersect_genes <- intersect(pathway_genes,rownames(scpharm.markers))
+intersect_genes
+seurat.combined <- AddModuleScore(seurat.combined, features = list(intersect_genes), 
+                                  name = 'ERBB_signaling & Afatinib_susceptible')
+```
+
+
+```{r,fig.width=4,fig.height=4}
+library(dplyr)
+library(ggpubr)
+library(ggplot2)
+library(patchwork)
+
+sig_col <- "ERBB_signaling & Afatinib_susceptible1"
+
+plot_df_sig <- seurat.combined@meta.data %>%
+  dplyr::select(broad_cell_type, all_of(sig_col)) %>%
+  dplyr::rename(signature_score = all_of(sig_col)) %>%
+  dplyr::filter(!is.na(signature_score)) %>%
+  dplyr::mutate(
+    broad_cell_type = factor(
+      broad_cell_type,
+      levels = c("Basal", "Luminal-Sec", "Luminal-HR")
+    )
+  )
+
+p_sig <- ggplot(plot_df_sig, aes(x = broad_cell_type, y = signature_score)) +
+  geom_violin(
+    fill = "grey90",
+    color = "grey20",
+    trim = FALSE
+  ) +
+  geom_boxplot(
+    width = 0.2,
+    fill = "white",
+    color = "grey20",
+    outlier.shape = NA
+  ) +
+  stat_compare_means(
+    method = "wilcox.test",
+    comparisons = list(
+      c("Basal", "Luminal-HR"),
+      c("Basal", "Luminal-Sec"),
+      c("Luminal-HR", "Luminal-Sec")
+    ),
+    p.adjust.method = "BH",
+    label = "p.signif"
+  ) +
+  labs(
+    x = "Breast epithelial subtypes",
+    y = "ERBB signaling score"
+  ) +
+  my_theme() +
+  plot_annotation(
+    tag_levels = list(c("Q"))
+  )
+
+p_sig
+
+ggsave(paste0(WORK_DIR,"Figures/Figure4_hbca_epi/Q_ERBB_signaling.pdf"),width = 4,height = 4)
+
+```
+
+## F4R Gene dot plot
+```{r,fig.width=5,fig.height=3.5}
+library(Seurat)
+library(ggplot2)
+library(dplyr)
+library(tidyr)
+library(tibble)
+
+# Extract gene expression and signature scores
+expr_mat <- FetchData(seurat.combined, 
+                      vars = c("ERBB2", "ERBB3", "ERBB4", 
+                               "broad_cell_type"))
+
+# Convert to long format and rename signature display labels
+plot_df <- expr_mat %>%
+  rownames_to_column("cell") %>%
+  pivot_longer(
+    cols      = c("ERBB2", "ERBB3", "ERBB4"),
+    names_to  = "feature",
+    values_to = "expression"
+  ) %>%
+  mutate(feature = factor(feature, levels = c(
+    "ERBB2", "ERBB3", "ERBB4"
+  )))
+
+# Calculate dot statistics
+dot_df <- plot_df %>%
+  group_by(broad_cell_type, feature) %>%
+  summarise(
+    avg_exp = mean(expression, na.rm = TRUE),
+    pct_exp = mean(expression > 0, na.rm = TRUE) * 100,
+    .groups = "drop"
+  )
+
+# Plot
+p <- ggplot(dot_df, aes(x = broad_cell_type, y = feature)) +
+  geom_point(aes(size = pct_exp, color = avg_exp)) +
+  scale_size_continuous(
+    range  = c(0.5, 6),
+    name   = "Percent expressed",
+    limits = c(0, 100)
+  ) +
+  scale_color_gradient(
+    low  = "lightgrey",
+    high = "#B22222",
+    name = "Average expression"
+  ) +
+  labs(x = NULL, y = NULL) +
+  theme_classic(base_size = 11) +
+  theme(
+    axis.text.x      = element_text(angle = 40, hjust = 1, size = 11, color = "black"),
+    axis.text.y      = element_text(size = 11, color = "black"),
+    panel.grid.major = element_line(color = "grey92", linewidth = 0.3),
+    legend.title     = element_text(size = 9),
+    legend.text      = element_text(size = 9),
+    plot.margin      = margin(8, 8, 8, 8)
+  )
+
+p +
+  plot_annotation(
+    tag_levels = list(c("R"))
+  )
+
+ggsave(paste0(WORK_DIR,"Figures/Figure4_hbca_epi/R_ERBBgenes.pdf"),width = 4,height = 4)
+
+```
+
+
+
+

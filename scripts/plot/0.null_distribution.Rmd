@@ -1,0 +1,86 @@
+---
+title: "visualize_null_distribution"
+output: html_document
+date: "2025-02-12"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo=TRUE, message=FALSE)
+```
+
+```{r}
+library(scPharm)
+library(patchwork)
+library(readxl)
+library(ComplexHeatmap)
+library(dplyr)
+library(rlang)
+library(flair)
+library(Cairo)
+library(VennDiagram)
+library(ggplot2)
+library(tidyr)
+library(tibble)
+library(ggridges)
+library(randomcoloR)
+library(circlize)
+library(stringr)
+library(RobustRankAggreg)
+library(pROC)
+source('/home/chenshuting/drug_toxicity/Normal_DSS/scripts/plot/visualization.R')
+```
+
+```{r}
+DATA_DIR <- '/home/chenshuting/drug_toxicity/null_distribution/'
+setwd(DATA_DIR)
+```
+
+# SF1A non-immune
+
+```{r}
+# Read null distribution NES separated by tissue-dataset
+NullDist_list_project <- readRDS(paste0(DATA_DIR,'Rdata/NullDist_list_project.rds'))
+NullDist_list <- readRDS(paste0(DATA_DIR,'Rdata/NullDist_list.rds'))
+NullDist <- NullDist_list$NullDist
+threshold_r <- NullDist_list$threshold_r
+threshold_s <- NullDist_list$threshold_s
+```
+
+
+```{r}
+names(NullDist_list_project)
+head(NullDist_list_project[[1]])
+head(NullDist)
+threshold_r
+threshold_s
+```
+
+```{r,fig.width=7.5,fig.height=4.5}
+draw_nulldist_density_plots(NullDist_list, "Non-immune null distribution")
+ggsave('/home/chenshuting/drug_toxicity/pan_tissue_landscape/Figures/supplementary_figures/A_nonimm_null.pdf',width=7.5,height=4.5)
+```
+
+# SF1B immune
+
+```{r}
+# Read null distribution NES separated by tissue-dataset
+NullDist_list_project <- readRDS(paste0(DATA_DIR,'Rdata/NullDist_list_project_imm.rds'))
+NullDist_list <- readRDS(paste0(DATA_DIR,'Rdata/NullDist_list_imm.rds'))
+NullDist <- NullDist_list$NullDist
+threshold_r <- NullDist_list$threshold_r
+threshold_s <- NullDist_list$threshold_s
+```
+
+
+```{r}
+names(NullDist_list_project)
+head(NullDist_list_project[[1]])
+head(NullDist)
+threshold_r
+threshold_s
+```
+
+```{r,fig.width=7.5,fig.height=4.5}
+draw_nulldist_density_plots(NullDist_list, "Immune null distribution")
+ggsave('/home/chenshuting/drug_toxicity/pan_tissue_landscape/Figures/supplementary_figures/B_imm_null.pdf',width=7.5,height=4.5)
+```

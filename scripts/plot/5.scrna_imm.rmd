@@ -1,0 +1,502 @@
+---
+output: 
+  html_document:
+    code_folding: hide
+    toc: true
+    toc_float: true
+    toc_depth: 2
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo=TRUE, message=FALSE)
+```
+
+```{r}
+library(tidyr)
+library(patchwork)
+library(dplyr)
+library(ggplot2)
+library(Seurat)
+library(DT)
+library(ComplexHeatmap)
+library(circlize)
+library(tibble)
+library(stringr)
+library(ggrepel)
+library(RColorBrewer)
+library(forcats)
+
+source('/home/chenshuting/drug_toxicity/Normal_DSS/scripts/plot/visualization.R')
+
+WORK_DIR <- '/home/chenshuting/drug_toxicity/pan_tissue_landscape/'
+DATA_DIR <- '/home/chenshuting/drug_toxicity/pan_tissue/Breast/GSE235326/'
+
+```
+
+# Read data with annotation, prediction results, umap
+
+```{r}
+celltype_col <- 'broad_cell_type'
+# Read Seurat object
+seurat.combined <- readRDS(paste0(WORK_DIR,'Rdata/breast_HumanBreastCellAtlas_imm_clustered.rds'))
+
+## Get 297 drug information
+drug_info <- readRDS('/home/chenshuting/drug_toxicity/prior_knowledge/drug_info_df.rds')
+
+```
+
+
+# F5A Original annotation UMAP plot
+```{r,fig.width=5,fig.height=4}
+DimPlot(seurat.combined,group.by=celltype_col,label=T) +
+  ggtitle("Breast immune subtypes") +
+  theme(
+    plot.title = element_text(size = 12)
+  )+
+  plot_annotation(tag_levels = list("A"))
+
+ggsave(paste0(WORK_DIR,"Figures/Figure5_hbca_imm/A_umap.pdf"),width = 5,height = 4)
+
+```
+
+
+# Drug-cluster sensitive cell proportion
+
+```{r, echo=TRUE,eval = FALSE}
+# Count sensitive/resistant proportion per drug-broad_cell_type
+prop_df <- lapply(drug_cols, function(drug_col) {
+  drug_name <- sub("^scPharm_label_", "", drug_col)
+  
+  metadata %>%
+    filter(!is.na(.data[[drug_col]])) %>%
+    group_by(broad_cell_type) %>%
+    summarise(
+      sensitive_prop = mean(.data[[drug_col]] == "sensitive"),
+      resistant_prop = mean(.data[[drug_col]] == "resistant"),
+      .groups = "drop"
+    ) %>%
+    mutate(drug_id_name = drug_name)
+}) %>% bind_rows()
+
+# Merge drug annotation (pathway)
+prop_df <- prop_df %>%
+  left_join(drug_info[, c("drug_id_name", "pathway_name")], by = "drug_id_name") %>%
+  mutate(pathway_name = ifelse(is.na(pathway_name), "Unknown", pathway_name))
+
+prop_df$broad_cell_type <- factor(prop_df$broad_cell_type,
+                                  levels = c("basal","lumsec","lumhr"))
+
+prop_df <- prop_df %>%
+  mutate(
+    drug_name = sub("^[^_]+_", "", drug_id_name)
+  )
+
+# Keep id for Selumetinib (appears twice in one tissue)
+prop_df$drug_name[prop_df$drug_id_name=='1062_Selumetinib'] <- 'Selumetinib_1062'
+prop_df$drug_name[prop_df$drug_id_name=='1736_Selumetinib'] <- 'Selumetinib_1736'
+
+saveRDS(prop_df,paste0(DATA_DIR,"Rdata/imm_prop_df.rds"))
+
+```
+
+```{r}
+prop_df <- readRDS(paste0(DATA_DIR,"Rdata/imm_prop_df.rds"))
+
+prop_df$broad_cell_type <- as.character(prop_df$broad_cell_type)
+
+prop_df$broad_cell_type[prop_df$broad_cell_type == "bcells"] <- "B cells"
+prop_df$broad_cell_type[prop_df$broad_cell_type == "tcells"] <- "T cells"
+prop_df$broad_cell_type[prop_df$broad_cell_type == "myeloid"] <- "Myeloid cells"
+
+# Get celltype-specific drugs
+library(dplyr)
+
+specific_df <- prop_df %>%
+  group_by(drug_id_name) %>%
+  mutate(
+    total_other = sum(sensitive_prop) - sensitive_prop,
+    specificity_score = sensitive_prop - total_other
+  ) %>%
+  ungroup()
+
+top3_labels <- specific_df %>%
+  group_by(broad_cell_type) %>%
+  arrange(desc(specificity_score)) %>%
+  slice_head(n = 3) %>%
+  ungroup()
+
+```
+
+
+
+
+## F5B Boxplot
+
+```{r,fig.width=4,fig.height=4}
+
+prop_df$broad_cell_type <- factor(prop_df$broad_cell_type,
+                                   levels = c("B cells", "T cells", "Myeloid cells")
+)
+
+prop_df2 <- prop_df %>%
+  mutate(
+    broad_cell_type = fct_reorder(
+      broad_cell_type,
+      sensitive_prop,
+      .fun = median,
+      .desc = TRUE
+    )
+  )
+prop_df2$broad_cell_type <- factor(prop_df2$broad_cell_type,
+                                   levels = c("B cells", "T cells", "Myeloid cells")
+)
+
+library(ggpubr)
+
+ggplot(prop_df2, aes(x = broad_cell_type, y = sensitive_prop)) +
+  geom_violin(
+    fill = "grey90",
+    color = "grey20",
+    trim = FALSE
+  ) +
+  geom_boxplot(
+    width = 0.2,
+    fill = "white",
+    color = "grey20",
+    outlier.shape = NA
+  ) +
+  stat_compare_means(
+    method = "wilcox.test",
+    comparisons = list(
+      c("B cells", "Myeloid cells"),
+      c("B cells", "T cells"),
+      c("Myeloid cells", "T cells")
+    ),
+    p.adjust.method = "BH",
+    label = "p.signif"
+  ) +
+  labs(
+    x = "Breast immune subtypes",
+    y = "DSS"
+  ) +
+  my_theme() +
+  plot_annotation(
+    tag_levels = list(c("B"))
+  )
+
+
+ggsave(paste0(WORK_DIR,"Figures/Figure5_hbca_imm/B_boxplot.pdf"),width = 4,height = 4)
+
+```
+
+
+
+
+## F5C-K umap
+
+```{r}
+top3drug_id_name_list <- list(
+  bcells = c('1084_Rapamycin','1373_Dabrafenib','2106_Uprosertib'),
+  myeloid = c('1736_Selumetinib','1014_Refametinib','1908_Ulixertinib'),
+  tcells = c('1006_Cytarabine','1011_Navitoclax','1558_Lapatinib')
+)
+
+library(patchwork)
+
+all_plots <- list()
+
+for (broad_cell_type in names(top3drug_id_name_list)) {
+  
+  # Get top drugs for each cell type
+  top3drug_id_name <- top3drug_id_name_list[[broad_cell_type]]
+  top3drug_name <- sub("^[^_]+_", "", top3drug_id_name)
+  
+  for (drug_id_name in top3drug_id_name) {
+    drug_name <- sub("^[^_]+_", "", drug_id_name)
+    drug_col <- paste0("scPharm_label_", drug_id_name)
+    
+    seurat.combined@meta.data[[drug_name]] <- ifelse(
+      seurat.combined@meta.data[[drug_col]] == "sensitive",
+      "Susceptible",
+      "Other"
+    )
+  }
+  
+  # Return list of individual plots instead of combining
+  p_list <- DimPlot(
+    seurat.combined,
+    group.by = top3drug_name,
+    cols = c("grey70", "firebrick"),
+    combine = FALSE
+  )
+  
+  all_plots <- c(all_plots, p_list)
+}
+```
+
+```{r,fig.width=20,fig.height=12}
+library(patchwork)
+library(ggplot2)
+
+# Manually add tags to subplots: C-K
+plot_tags <- LETTERS[3:(3 + length(all_plots) - 1)]  # C:K
+
+all_plots_tagged <- Map(
+  function(p, tag) {
+    p +
+      labs(tag = tag) +
+      theme(
+        plot.tag = element_text(size = 14, face = "bold"),
+        plot.tag.position = c(0, 1)
+      )
+  },
+  all_plots,
+  plot_tags
+)
+
+# Leave first 3 positions empty in first row, place first plot at position 4
+plot_layout_list <- c(
+  list(plot_spacer(), plot_spacer(), plot_spacer(), all_plots_tagged[[1]]),
+  all_plots_tagged[2:9]
+)
+
+# Layout: 3 rows, 4 columns
+final_plot <- wrap_plots(plot_layout_list, ncol = 4, nrow = 3)
+
+final_plot
+
+ggsave(paste0(WORK_DIR,"Figures/Figure5_hbca_imm/C-K_umap_scpharm.pdf"),width = 20,height = 12)
+```
+
+## ERK MAPK pathway boxplot
+
+```{r,fig.width=4,fig.height=4.5}
+
+prop_df$drug_name[prop_df$drug_id_name=='1062_Selumetinib'] <- 'Selumetinib_r1'
+prop_df$drug_name[prop_df$drug_id_name=='1736_Selumetinib'] <- 'Selumetinib_r2'
+
+
+prop_df_pathway <- prop_df[prop_df$pathway_name=='ERK MAPK signaling',]
+
+library(ggplot2)
+library(ggrepel)
+
+# Mark highlight status
+prop_df_pathway$highlight <- prop_df_pathway$drug_name %in% c("Selumetinib_r1","Selumetinib_r2")
+
+comparisons <- list(
+      c("B cells", "Myeloid cells"),
+      c("B cells", "T cells"),
+      c("Myeloid cells", "T cells")
+)
+
+y_max <- max(prop_df_pathway$sensitive_prop, na.rm = TRUE)
+
+ggplot(
+  prop_df_pathway,
+  aes(x = broad_cell_type, y = sensitive_prop)
+) +
+  geom_boxplot(
+    fill = "white",
+    outlier.shape = NA
+  ) +
+  geom_jitter(
+    data = subset(prop_df_pathway, !highlight),
+    width = 0.2,
+    size = 1.5,
+    color = "grey70",
+    alpha = 0.6
+  ) +
+  geom_jitter(
+    data = subset(prop_df_pathway, highlight),
+    width = 0.2,
+    size = 3,
+    color = "#D55E00"
+  ) +
+  geom_text_repel(
+  data = subset(prop_df_pathway, highlight),
+  aes(label = drug_name),
+  size = 4,
+  color = "#D55E00",
+  box.padding = 0.6,
+  point.padding = 0.5,
+  force = 3,
+  force_pull = 0.3,
+  max.overlaps = Inf,
+  max.time = 3,
+  max.iter = 20000
+) +
+  stat_compare_means(
+    comparisons = comparisons,
+    method = "wilcox.test",
+    p.adjust.method = "BH",
+    label = "p.signif",
+    label.y = c(y_max * 1.08, y_max * 1.16, y_max * 1.24)
+  ) +
+  labs(
+    x = "Breast immune subtypes",
+    y = "DSS",
+    title = "ERK/MAPK signaling"
+  ) +
+  my_theme() +
+  theme(
+    plot.title = element_text(size = 12)
+  ) +
+  coord_cartesian(ylim = c(0, y_max * 1.3), clip = "off") +
+  plot_annotation(
+    tag_levels = list(c("L"))
+  )
+
+
+
+ggsave(paste0(WORK_DIR,"Figures/Figure5_hbca_imm/L_ERK_boxplot.pdf"),width = 4,height = 4.5)
+
+
+```
+
+
+## F5M Signature violin plot
+
+```{r}
+pathway_name <- 'MAPK_SIGNALING_PATHWAY'
+gs_list <- readRDS('/home/chenshuting/Pipelines/ORA/gs_list.rds')
+gs_kegg <- gs_list$kegg
+pathway_genes <- gs_kegg$gene_symbols[gs_kegg$gs_name==pathway_name]
+```
+
+Intersection of drug DE genes and pathway genes
+
+```{r}
+drug_col <- "scPharm_label_1736_Selumetinib"
+scpharm.markers <- readRDS(paste0(DATA_DIR,'Rdata/scPharmDE_',drug_col,".rds"))
+intersect_genes <- intersect(pathway_genes,rownames(scpharm.markers))
+intersect_genes
+seurat.combined <- AddModuleScore(seurat.combined, features = list(intersect_genes), 
+                                  name = 'MAPK_signaling & Selumetinib_susceptible')
+```
+
+
+```{r,fig.width=4,fig.height=4}
+library(dplyr)
+library(ggpubr)
+library(ggplot2)
+library(patchwork)
+
+sig_col <- "MAPK_signaling & Selumetinib_susceptible1"
+
+plot_df_sig <- seurat.combined@meta.data %>%
+  dplyr::select(broad_cell_type, all_of(sig_col)) %>%
+  dplyr::rename(signature_score = all_of(sig_col)) %>%
+  dplyr::filter(!is.na(signature_score)) %>%
+  dplyr::mutate(
+    broad_cell_type = factor(
+      broad_cell_type,
+      levels =  c("B cells", "T cells", "Myeloid cells")
+    )
+  )
+
+p_sig <- ggplot(plot_df_sig, aes(x = broad_cell_type, y = signature_score)) +
+  geom_violin(
+    fill = "grey90",
+    color = "grey20",
+    trim = FALSE
+  ) +
+  geom_boxplot(
+    width = 0.2,
+    fill = "white",
+    color = "grey20",
+    outlier.shape = NA
+  ) +
+  stat_compare_means(
+    method = "wilcox.test",
+    comparisons = list(
+      c("B cells", "Myeloid cells"),
+      c("B cells", "T cells"),
+      c("Myeloid cells", "T cells")
+    ),
+    p.adjust.method = "BH",
+    label = "p.signif"
+  ) +
+  labs(
+    x = "Breast immune subtypes",
+    y = "ERK/MAPK signaling score"
+  ) +
+  my_theme() +
+  plot_annotation(
+    tag_levels = list(c("M"))
+  )
+
+p_sig
+
+ggsave(paste0(WORK_DIR,"Figures/Figure5_hbca_imm/M_MAPK_signaling.pdf"),width = 4,height = 4)
+
+```
+
+## F5N Gene dot plot
+
+```{r,fig.width=5,fig.height=4}
+library(Seurat)
+library(ggplot2)
+library(dplyr)
+library(tidyr)
+library(tibble)
+
+# Extract gene expression and signature scores
+expr_mat <- FetchData(seurat.combined, 
+                      vars = c("MAP2K1", "MAP2K3", "DUSP6","FOS",
+                               "broad_cell_type"))
+
+# Convert to long format and rename signature display labels
+plot_df <- expr_mat %>%
+  rownames_to_column("cell") %>%
+  pivot_longer(
+    cols      = c("MAP2K1","MAP2K3", "DUSP6","FOS"),
+    names_to  = "feature",
+    values_to = "expression"
+  ) %>%
+  mutate(feature = factor(feature, levels = c(
+    "MAP2K1","MAP2K3", "DUSP6","FOS"
+  )))
+
+# Calculate dot statistics
+dot_df <- plot_df %>%
+  group_by(broad_cell_type, feature) %>%
+  summarise(
+    avg_exp = mean(expression, na.rm = TRUE),
+    pct_exp = mean(expression > 0, na.rm = TRUE) * 100,
+    .groups = "drop"
+  )
+
+# Plot
+p <- ggplot(dot_df, aes(x = broad_cell_type, y = feature)) +
+  geom_point(aes(size = pct_exp, color = avg_exp)) +
+  scale_size_continuous(
+    range  = c(0.5, 6),
+    name   = "Percent expressed",
+    limits = c(0, 100)
+  ) +
+  scale_color_gradient(
+    low  = "lightgrey",
+    high = "#B22222",
+    name = "Average expression"
+  ) +
+  labs(x = NULL, y = NULL) +
+  theme_classic(base_size = 11) +
+  theme(
+    axis.text.x      = element_text(angle = 40, hjust = 1, size = 11, color = "black"),
+    axis.text.y      = element_text(size = 11, color = "black"),
+    panel.grid.major = element_line(color = "grey92", linewidth = 0.3),
+    legend.title     = element_text(size = 9),
+    legend.text      = element_text(size = 9),
+    plot.margin      = margin(8, 8, 8, 8)
+  )
+
+p +
+  plot_annotation(
+    tag_levels = list(c("N"))
+  )
+
+ggsave(paste0(WORK_DIR,"Figures/Figure5_hbca_imm/N_MAPK_4genes.pdf"),width = 5,height = 4)
+
+```
+

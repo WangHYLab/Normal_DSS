@@ -1,0 +1,190 @@
+---
+title: "visualize_null_distribution"
+output: html_document
+date: "2025-02-12"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo=TRUE, message=FALSE)
+```
+
+```{r}
+library(scPharm)
+library(patchwork)
+library(readxl)
+library(ComplexHeatmap)
+library(dplyr)
+library(rlang)
+library(flair)
+library(Cairo)
+library(VennDiagram)
+library(ggplot2)
+library(tidyr)
+library(tibble)
+library(ggridges)
+library(randomcoloR)
+library(circlize)
+library(stringr)
+library(RobustRankAggreg)
+library(pROC)
+source('/home/chenshuting/drug_toxicity/pan_tissue/run_scpharm_function.R')
+```
+
+```{r}
+DATA_DIR <- '/home/chenshuting/drug_toxicity/null_distribution/'
+setwd(DATA_DIR)
+```
+
+```{r}
+# Read null distribution NES separated by tissue-dataset
+NullDist_list_project <- readRDS(paste0(DATA_DIR,'Rdata/NullDist_list_project_imm.rds'))
+NullDist_list <- readRDS(paste0(DATA_DIR,'Rdata/NullDist_list_imm.rds'))
+NullDist <- NullDist_list$NullDist
+threshold_r <- NullDist_list$threshold_r
+threshold_s <- NullDist_list$threshold_s
+```
+
+
+```{r}
+names(NullDist_list_project)
+head(NullDist_list_project[[1]])
+head(NullDist)
+threshold_r
+threshold_s
+```
+
+
+```{r,fig.width=7.5,fig.height=4.5}
+draw_nulldist_density_plots(NullDist_list, "Immune null distribution")
+ggsave('/home/chenshuting/drug_toxicity/pan_tissue_landscape/Figures/supplementary_figures/B_imm_null.pdf',width=7.5,height=4.5)
+```
+
+Save null distribution density data as background to avoid recalculating from all values each time
+```{r, echo=TRUE,eval = FALSE}
+# Compute density for the null distribution
+null_density <- density(NullDist_list$NullDist)
+
+# Store density information as a data frame
+null_density_df <- data.frame(x = null_density$x, y = null_density$y)
+
+# Save the density data to a file (optional)
+saveRDS(null_density_df, file = paste0(DATA_DIR,
+                                       "Rdata/null_density_imm.rds"))
+
+```
+
+
+
+
+Data processing
+```{r}
+
+NullDist_df <- bind_rows(
+  lapply(names(NullDist_list_project), function(name) {
+    # Split tissue and dataset names
+    tissue_dataset <- unlist(strsplit(name, "_", fixed = TRUE))
+    tissue <- tissue_dataset[1]  # tissue
+    dataset <- paste(tissue_dataset[-1], collapse = "_")  # dataset
+    
+    # Process Drug column, remove "scPharm_nes_" prefix
+    NullDist_list_project[[name]] %>%
+      mutate(
+        Tissue = tissue,
+        Dataset = dataset,
+        Drug = sub("^scPharm_nes_", "", Drug)  # remove prefix
+      )
+  })
+)
+
+
+NullDist_df <- NullDist_df %>%
+  select(Tissue, Dataset, Drug, NES) %>%
+  arrange(Tissue, Dataset, Drug)
+
+```
+
+
+
+Arrange NES distribution plots based on sensitivity thresholds calculated per tissue
+```{r,fig.width=12}
+library(patchwork)
+library(mixtools)
+
+# Read background density data
+bg_density_df <- readRDS(paste0(DATA_DIR, "Rdata/null_density_imm.rds"))
+
+# Get all unique tissues
+tissue_list <- unique(NullDist_df$Tissue)
+
+# Initialize an empty list to store plots and thresholds
+plot_threshold_list <- list()
+
+# Loop through each tissue and generate the plot + threshold
+for (tissue in tissue_list) {
+  # Extract NES values for the current tissue
+  target_values <- NullDist_df$NES[NullDist_df$Tissue == tissue]
+  
+  # Generate the density plot using the custom function
+  plot <- draw_density_plots_bgnes(paste0("NES distribution of ", tissue), bg_density_df, target_values)
+  
+  set.seed(42)
+  
+  # Compute the sensitive threshold.s for sorting
+  out.mix <- normalmixEM(target_values)
+  
+  # Sort by peak position (left to right)
+  sorted_indices <- order(out.mix$mu)
+  mu_sorted <- out.mix$mu[sorted_indices]
+  sigma_sorted <- out.mix$sigma[sorted_indices]
+  
+  threshold.s <- mu_sorted[1] - sigma_sorted[1]  # Sensitive threshold
+  print(tissue)
+  print(threshold.s)
+
+  # Store both the plot and threshold as a named list
+  plot_threshold_list[[tissue]] <- list(plot = plot, threshold = threshold.s)
+}
+
+# Sort the list by threshold.s in ascending order
+sorted_tissues <- names(sort(sapply(plot_threshold_list, function(x) x$threshold)))
+
+# Extract sorted plots
+sorted_plots <- lapply(sorted_tissues, function(t) plot_threshold_list[[t]]$plot)
+
+# Combine all plots in sorted order
+final_plot <- wrap_plots(sorted_plots) + plot_layout(ncol = 4)  # Adjust `ncol` as needed
+
+# Print the final combined plot
+print(final_plot)
+
+
+```
+
+
+```{r}
+library(ggplot2)
+
+# Extract tissue names and sorted threshold values
+sorted_thresholds <- sort(sapply(plot_threshold_list, function(x) x$threshold))
+
+# Convert to data frame for plotting
+threshold_df <- data.frame(
+  Tissue = factor(names(sorted_thresholds), levels = names(sorted_thresholds)),  # Keep sorting order
+  Threshold = sorted_thresholds
+)
+
+# Create the bar plot
+threshold_plot <- ggplot(threshold_df, aes(x = Tissue, y = Threshold, fill = Tissue)) +
+  geom_bar(stat = "identity") +  # Bar plot
+  coord_flip() +  # Flip for readability
+  labs(title = "Sorted Threshold.s Values by Tissue",
+       x = "Tissue",
+       y = "Threshold.s") +
+  theme_minimal() +
+  theme(legend.position = "none")  # Hide legend for clarity
+
+# Print the bar plot
+print(threshold_plot)
+
+```
+
