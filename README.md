@@ -12,3 +12,7 @@
 - `null_distribution/` - Generation and visualization of null distributions
 - `plot/` - Visualization scripts for main and supplementary figures
 
+### supplementary_tables/ - Supplementary Tables
+- `Supplementary table 1.xlsx` - Single-cell and single-nucleus RNA-seq samples collected in this study
+- `Supplementary table 2.xlsx` - Samples and cell counts from the DISCO resource used for constructing the null distribution
+- `Supplementary table 3.xlsx` - Ranking of susceptibility-associated drugs across tissues and cell types
